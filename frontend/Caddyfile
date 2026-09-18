@@ -1,0 +1,6 @@
+:80 {
+	root * /srv
+	encode gzip
+	try_files {path} /admin_ia/index.html
+	file_server
+}

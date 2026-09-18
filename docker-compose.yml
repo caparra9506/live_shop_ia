@@ -15,18 +15,10 @@ services:
     build: ./backend
     container_name: liveshop-ai-backend
     restart: unless-stopped
-    environment:
-      AI_DB_HOST: liveshop-ai-db
-      AI_DB_PASSWORD: ${AI_DB_PASSWORD}
-      LIVESHOP_DB_HOST: liveshop-mysql
-      LIVESHOP_DB_PASSWORD: compre_pues
-      EVOLUTION_API_URL: http://liveshop-evolution-api:8080
-      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
-      LIVESHOP_BACKEND_URL: http://liveshop-backend:3000
-      CHATWOOT_BASE_URL: http://liveshop-chatwoot:3000
-      CHATWOOT_API_TOKEN: ${CHATWOOT_API_TOKEN}
-      JWT_SECRET: abc123
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    ports:
+      - "8001:8000"
+    env_file:
+      - ./backend/.env
     depends_on:
       - ai-db
     networks:
