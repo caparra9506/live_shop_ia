@@ -1,0 +1,51 @@
+services:
+  ai-db:
+    image: postgres:17
+    container_name: liveshop-ai-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${AI_DB_PASSWORD}
+      POSTGRES_DB: liveshop_ai
+    volumes:
+      - ai_db_data:/var/lib/postgresql/data
+    networks:
+      - liveshop_net
+
+  ai-backend:
+    build: ./backend
+    container_name: liveshop-ai-backend
+    restart: unless-stopped
+    environment:
+      AI_DB_HOST: liveshop-ai-db
+      AI_DB_PASSWORD: ${AI_DB_PASSWORD}
+      LIVESHOP_DB_HOST: liveshop-mysql
+      LIVESHOP_DB_PASSWORD: compre_pues
+      EVOLUTION_API_URL: http://liveshop-evolution-api:8080
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      LIVESHOP_BACKEND_URL: http://liveshop-backend:3000
+      CHATWOOT_BASE_URL: http://liveshop-chatwoot:3000
+      CHATWOOT_API_TOKEN: ${CHATWOOT_API_TOKEN}
+      JWT_SECRET: abc123
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      - ai-db
+    networks:
+      - liveshop_net
+
+  ai-frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_AI_API_URL: https://liveshop.com.co/ai-api
+        VITE_LIVESHOP_API_URL: https://liveshop.com.co/api
+    container_name: liveshop-ai-frontend
+    restart: unless-stopped
+    networks:
+      - liveshop_net
+
+networks:
+  liveshop_net:
+    external: true
+
+volumes:
+  ai_db_data:

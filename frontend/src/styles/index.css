@@ -1,0 +1,25 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Inter:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Paleta Nebula Kinetic (modo oscuro) - mismos valores que live_shop_front/src/styles/global.css
+   Este panel es solo oscuro por ahora, es una herramienta interna. */
+:root {
+  --color-background: 15 13 22;
+  --color-surface: 15 13 22;
+  --color-surface-container: 27 24 35;
+  --color-surface-container-high: 33 30 42;
+  --color-on-surface: 245 238 252;
+  --color-on-surface-variant: 174 169 182;
+  --color-primary: 184 159 255;
+  --color-on-primary: 55 0 142;
+  --color-secondary: 0 244 254;
+  --color-error: 255 110 132;
+  --color-outline: 120 115 127;
+}
+
+body {
+  @apply bg-background text-on-surface font-body;
+}
