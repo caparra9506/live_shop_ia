@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user, require_store_access, bearer_scheme
 from app.config import settings
-from app.constants import CAPTURE_LABEL
+from app.constants import CAPTURE_LABEL, REGISTERED_LABEL
 from app.db import get_ai_db
 from app.models import Conversation, Message, WhatsappInstance
 from app.schemas import ConversationOut, ConversationDetailOut, MessageOut
@@ -77,6 +77,27 @@ def get_conversation(
     return conversation
 
 
+def _apply_internal_label(db: Session, conversation: Conversation, title: str, color: str) -> None:
+    """Pone una etiqueta de uso interno en la conversacion (local + Chatwoot),
+    creandola en la tienda si todavia no existe."""
+    cfg = get_store_ai_config(conversation.store_id)
+    if not any(item.get("title") == title for item in cfg.extra_labels):
+        save_store_ai_config(
+            conversation.store_id,
+            extra_labels=[{"title": title, "color": color}, *cfg.extra_labels],
+        )
+
+    conversation.current_label = title
+    db.commit()
+    db.refresh(conversation)
+
+    if conversation.chatwoot_conversation_id:
+        try:
+            chatwoot_client.set_labels(conversation.store_id, conversation.chatwoot_conversation_id, [title])
+        except httpx.HTTPError:
+            pass  # la etiqueta local ya quedo puesta, se puede resincronizar despues
+
+
 @router.post("/{conversation_id}/mark-capturing", response_model=ConversationOut)
 def mark_capturing(
     conversation_id: int,
@@ -92,21 +113,7 @@ def mark_capturing(
         raise HTTPException(status_code=404, detail="Conversacion no encontrada")
     require_store_access(conversation.store_id, user)
 
-    cfg = get_store_ai_config(conversation.store_id)
-    if not any(item.get("title") == CAPTURE_LABEL for item in cfg.extra_labels):
-        updated_list = [{"title": CAPTURE_LABEL, "color": "#f59e0b"}, *cfg.extra_labels]
-        save_store_ai_config(conversation.store_id, extra_labels=updated_list)
-
-    conversation.current_label = CAPTURE_LABEL
-    db.commit()
-    db.refresh(conversation)
-
-    if conversation.chatwoot_conversation_id:
-        try:
-            chatwoot_client.set_labels(conversation.store_id, conversation.chatwoot_conversation_id, [CAPTURE_LABEL])
-        except httpx.HTTPError:
-            pass  # la etiqueta local ya quedo puesta, se puede resincronizar despues
-
+    _apply_internal_label(db, conversation, CAPTURE_LABEL, "#f59e0b")
     return ConversationOut.model_validate(conversation)
 
 
@@ -128,12 +135,19 @@ def register_user(
     tik_tok_user REAL en el backend NestJS (la escritura no se hace directo
     a MySQL desde aca). NO se toca contact_phone de la conversacion (sigue
     siendo el usuario de TikTok, es la llave que usa el webhook para agrupar
-    sus comentarios) - el proximo comentario suyo ya lo reconoce como
-    registrado y el agente le responde/envia por WhatsApp normal."""
+    sus comentarios): el WhatsApp queda en whatsapp_phone, desde donde ya se
+    le puede escribir y recibir sus respuestas. La conversacion sale de "En
+    captura de cliente" a "Cliente registrado"."""
     conversation = db.query(Conversation).filter_by(id=conversation_id).first()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversacion no encontrada")
     require_store_access(conversation.store_id, user)
+
+    # tik_tok_user guarda el numero como lo usa el resto del sistema (10
+    # digitos, sin indicativo); el 57 solo se agrega al hablar con Evolution.
+    phone = "".join(ch for ch in payload.phone if ch.isdigit())
+    if len(phone) < 10:
+        raise HTTPException(status_code=422, detail="El numero de WhatsApp no parece valido")
 
     try:
         resp = httpx.post(
@@ -142,7 +156,7 @@ def register_user(
                 "storeId": conversation.store_id,
                 "tiktok": conversation.contact_phone,
                 "name": payload.name,
-                "phone": payload.phone,
+                "phone": phone,
             },
             headers={"Authorization": f"Bearer {credentials.credentials}"},
             timeout=15.0,
@@ -151,6 +165,9 @@ def register_user(
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"No se pudo registrar el cliente: {e}")
 
+    conversation.whatsapp_phone = evolution_client.normalize_phone(phone)
+    conversation.contact_name = payload.name.strip()[:120]
+    _apply_internal_label(db, conversation, REGISTERED_LABEL, "#22c55e")
     return ConversationOut.model_validate(conversation)
 
 
@@ -172,8 +189,10 @@ def reply_to_conversation(
         raise HTTPException(status_code=404, detail="Conversacion no encontrada")
     require_store_access(conversation.store_id, user)
 
-    is_real_phone = conversation.contact_phone.lstrip("+").isdigit()
-    if not is_real_phone:
+    phone = conversation.whatsapp_phone or (
+        conversation.contact_phone if conversation.contact_phone.lstrip("+").isdigit() else None
+    )
+    if not phone:
         raise HTTPException(
             status_code=422,
             detail="Este contacto no tiene un telefono de WhatsApp conocido (no esta registrado en la tienda)",
@@ -184,7 +203,7 @@ def reply_to_conversation(
         raise HTTPException(status_code=422, detail="El WhatsApp de esta tienda no esta conectado")
 
     try:
-        evolution_client.send_text(instance.instance_name, conversation.contact_phone, payload.text)
+        evolution_client.send_text(instance.instance_name, phone, payload.text)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"No se pudo enviar por WhatsApp: {e}")
 

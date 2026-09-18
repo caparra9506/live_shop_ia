@@ -24,6 +24,12 @@ class Conversation(Base):
     id = Column(Integer, primary_key=True)
     store_id = Column(Integer, nullable=False, index=True)
     contact_phone = Column(String(40), nullable=False)
+    # contact_phone es la llave con la que el webhook agrupa los comentarios
+    # (el usuario de TikTok) y NO cambia al registrar al cliente. Estos dos
+    # campos guardan lo que el vendedor consiguio por fuera: con
+    # whatsapp_phone ya se le puede escribir (y recibir sus respuestas).
+    whatsapp_phone = Column(String(40), nullable=True, index=True)
+    contact_name = Column(String(120), nullable=True)
     chatwoot_conversation_id = Column(Integer, nullable=True)
     # Ultima intencion clasificada para esta conversacion (venta/queja/soporte/
     # no_registrado) - alimenta la vista de "agrupado por etiqueta" del panel,

@@ -26,6 +26,8 @@ class ConversationOut(BaseModel):
     id: int
     store_id: int
     contact_phone: str
+    whatsapp_phone: str | None = None
+    contact_name: str | None = None
     chatwoot_conversation_id: int | None
     current_label: str | None
     created_at: datetime

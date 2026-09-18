@@ -12,7 +12,7 @@ import logging
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from app.constants import CAPTURE_LABEL
+from app.constants import INTERNAL_LABELS
 from app.db import LiveshopSessionLocal
 from app.graph.state import AgentState
 from app.mysql_tools import find_store_by_name, find_products, find_tiktok_user
@@ -167,7 +167,7 @@ def classify_intent(state: AgentState) -> AgentState:
     cfg = get_store_ai_config(state["store_id"])
     custom_labels = [
         item["title"] for item in cfg.extra_labels
-        if item.get("title") and item["title"] != CAPTURE_LABEL
+        if item.get("title") and item["title"] not in INTERNAL_LABELS
     ]
     no_registrado_text = cfg.labels.get("no_registrado", "Nuevo contacto")
 

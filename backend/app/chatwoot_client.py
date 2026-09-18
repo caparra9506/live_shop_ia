@@ -85,14 +85,14 @@ def create_conversation(store_id: int, contact_id: int, inbox_id: int) -> dict:
         return conversation
 
 
-def create_message(store_id: int, conversation_id: int, content: str) -> None:
-    """Deja registro en Chatwoot de una respuesta enviada a mano desde el
-    panel - message_type 'outgoing' para que se vea como del agente, no del
-    cliente."""
+def create_message(store_id: int, conversation_id: int, content: str, incoming: bool = False) -> None:
+    """Deja registro en Chatwoot de un mensaje. Por defecto es una respuesta
+    enviada a mano desde el panel ('outgoing', se ve como del agente);
+    incoming=True es lo que el cliente escribio por WhatsApp."""
     with _client(store_id) as client:
         resp = client.post(
             f"/conversations/{conversation_id}/messages",
-            json={"content": content, "message_type": "outgoing"},
+            json={"content": content, "message_type": "incoming" if incoming else "outgoing"},
         )
         resp.raise_for_status()
 

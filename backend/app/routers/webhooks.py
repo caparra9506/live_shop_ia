@@ -1,9 +1,14 @@
+import logging
+
 from fastapi import APIRouter, Request
 
 from app.db import LiveshopSessionLocal, AiSessionLocal
 from app.models import WhatsappInstance, Conversation, Message
 from app.mysql_tools import find_store_by_name
 from app.graph.graph import get_graph
+from app import chatwoot_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -75,3 +80,70 @@ async def tiktok_comment_webhook(request: Request):
             ai_db.close()
 
     return {"ok": True, "intent": result.get("intent"), "response_text": result.get("response_text")}
+
+
+def _incoming_text(message: dict) -> str | None:
+    return (
+        message.get("conversation")
+        or (message.get("extendedTextMessage") or {}).get("text")
+        or (message.get("imageMessage") or {}).get("caption")
+    )
+
+
+@router.post("/evolution/{instance_name}")
+async def evolution_webhook(instance_name: str, request: Request):
+    """Mensajes de WhatsApp que un cliente le responde a la tienda. NO dispara
+    el agente de IA (eso es solo para comentarios del live) - unicamente se
+    guarda el mensaje en la conversacion de ese cliente para que el vendedor
+    lo vea y le conteste desde el panel."""
+    payload = await request.json()
+    data = payload.get("data") or {}
+    key = data.get("key") or {}
+
+    if key.get("fromMe"):
+        return {"ignored": "mensaje propio"}
+
+    # Evolution v2 puede entregar el id interno (@lid) en remoteJid y el
+    # numero real en remoteJidAlt.
+    jid = key.get("remoteJid") or ""
+    if jid.endswith("@lid"):
+        jid = key.get("remoteJidAlt") or jid
+    if not jid.endswith("@s.whatsapp.net"):
+        return {"ignored": "no es un chat individual"}
+    phone = jid.split("@")[0]
+
+    text = _incoming_text(data.get("message") or {})
+    if not text:
+        return {"ignored": "mensaje sin texto"}
+
+    db = AiSessionLocal()
+    try:
+        instance = db.query(WhatsappInstance).filter_by(instance_name=instance_name).first()
+        if not instance:
+            return {"ignored": "instancia desconocida"}
+
+        conversation = (
+            db.query(Conversation)
+            .filter(
+                Conversation.store_id == instance.store_id,
+                (Conversation.whatsapp_phone == phone) | (Conversation.contact_phone == phone),
+            )
+            .order_by(Conversation.created_at.desc())
+            .first()
+        )
+        if not conversation:
+            return {"ignored": "el numero no corresponde a ningun cliente registrado"}
+
+        db.add(Message(conversation_id=conversation.id, direction="in", body=text))
+        db.commit()
+        store_id, chatwoot_conversation_id = conversation.store_id, conversation.chatwoot_conversation_id
+    finally:
+        db.close()
+
+    if chatwoot_conversation_id:
+        try:
+            chatwoot_client.create_message(store_id, chatwoot_conversation_id, text, incoming=True)
+        except Exception:
+            logger.exception("No se pudo reflejar el mensaje entrante en Chatwoot (store_id=%s)", store_id)
+
+    return {"ok": True}

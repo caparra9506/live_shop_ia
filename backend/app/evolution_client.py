@@ -7,6 +7,16 @@ from app.config import settings
 from app.settings_store import get_infra_settings
 
 
+def normalize_phone(raw: str) -> str:
+    """Deja solo digitos y, para un celular colombiano de 10 digitos (3XXXXXXXXX,
+    como se guarda en tik_tok_user), le antepone el indicativo 57 - Evolution
+    necesita el numero completo. Es idempotente sobre numeros que ya lo traen."""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10 and digits.startswith("3"):
+        digits = "57" + digits
+    return digits
+
+
 def _client() -> httpx.Client:
     api_key = get_infra_settings().evolution_api_key
     headers = {"apikey": api_key, "Content-Type": "application/json"}
@@ -82,7 +92,7 @@ def send_text(instance_name: str, phone: str, text: str) -> dict:
     with _client() as client:
         resp = client.post(
             f"/message/sendText/{instance_name}",
-            json={"number": phone, "text": text},
+            json={"number": normalize_phone(phone), "text": text},
         )
         resp.raise_for_status()
         return resp.json()
@@ -93,7 +103,7 @@ def send_media(instance_name: str, phone: str, media_url: str, media_type: str, 
         resp = client.post(
             f"/message/sendMedia/{instance_name}",
             json={
-                "number": phone,
+                "number": normalize_phone(phone),
                 "mediatype": media_type,  # 'image' | 'document'
                 "media": media_url,
                 "caption": caption,
