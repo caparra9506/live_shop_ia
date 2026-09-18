@@ -8,14 +8,18 @@ Cada tienda tiene su propio proveedor/API key de IA y su propio prompt
 un solo agente compartido entre tiendas."""
 
 import logging
+from datetime import datetime, timedelta, timezone
 
+import httpx
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from app.constants import INTERNAL_LABELS
 from app.db import LiveshopSessionLocal
 from app.graph.state import AgentState
-from app.mysql_tools import find_store_by_name, find_products, find_tiktok_user
+from app.config import settings
+from app.mysql_tools import find_store_by_name, find_products, find_tiktok_user, list_store_products
+from app import sales
 from app.settings_store import get_store_ai_config, StoreAiSettings
 from app import evolution_client, chatwoot_client
 
@@ -205,15 +209,75 @@ def classify_intent(state: AgentState) -> AgentState:
     return {**state, "intent": SIN_CLASIFICAR, "label_text": no_registrado_text, "skip_response": False, "ai_log_id": log_id}
 
 
-def search_products(state: AgentState) -> AgentState:
-    if state["intent"] in ("no_registrado", SIN_CLASIFICAR) or not state.get("store_id"):
-        return {**state, "products": []}
-    db = LiveshopSessionLocal()
+# Ventana en la que NO se repite el mismo link al mismo cliente (la gente
+# comenta "mio" varias veces seguidas).
+OFFER_DEDUPE_MINUTES = 10
+
+
+def _recently_offered(conversation_id: int | None, product_id: int) -> bool:
+    if not conversation_id:
+        return False
+    from app.db import AiSessionLocal
+    from app.models import Message
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=OFFER_DEDUPE_MINUTES)
+    db = AiSessionLocal()
     try:
-        products = find_products(db, state["store_id"], state["comment"])
+        return (
+            db.query(Message.id)
+            .filter(
+                Message.conversation_id == conversation_id,
+                Message.direction == "out",
+                Message.created_at >= since,
+                Message.body.like(f"%productId={product_id}&%"),
+            )
+            .first()
+            is not None
+        )
     finally:
         db.close()
-    return {**state, "products": products}
+
+
+def search_products(state: AgentState) -> AgentState:
+    """Dos cosas: (1) deteccion DETERMINISTA del codigo de un producto en el
+    comentario -> oferta de venta automatica (imagen + link de pago), y (2) el
+    contexto de productos para el LLM, como antes.
+
+    La oferta solo se arma si el cliente esta registrado (hay telefono, igual
+    que en n8n) y el producto esta disponible; y no se repite si ya se le
+    mando ese mismo link hace poco."""
+    if not state.get("store_id"):
+        return {**state, "products": [], "offer": None, "offer_suppressed": False}
+
+    db = LiveshopSessionLocal()
+    try:
+        catalog = list_store_products(db, state["store_id"])
+        by_code = sales.match_product_by_code(catalog, state["comment"])
+        products = [by_code] if by_code else (
+            []
+            if state["intent"] in ("no_registrado", SIN_CLASIFICAR)
+            else find_products(db, state["store_id"], state["comment"])
+        )
+    finally:
+        db.close()
+
+    offer, suppressed = None, False
+    user = state.get("tiktok_user")
+    if by_code and user and user.get("phone") and user.get("id") and sales.is_available(by_code):
+        if _recently_offered(state.get("conversation_id"), by_code["id"]):
+            suppressed = True
+        else:
+            store_name = (state.get("store") or {}).get("name", state["store_name"])
+            url = sales.build_checkout_url(settings.liveshop_public_url, store_name, by_code["id"], user["id"])
+            offer = {
+                "product_id": by_code["id"],
+                "image_url": by_code.get("imageUrl"),
+                "checkout_url": url,
+                "caption": sales.build_offer_caption(
+                    user.get("name") or state["username"], by_code["name"], by_code["price"], url
+                ),
+            }
+    return {**state, "products": products, "offer": offer, "offer_suppressed": suppressed}
 
 
 def route_to_chatwoot(state: AgentState) -> AgentState:
@@ -274,6 +338,17 @@ def compose_response(state: AgentState) -> AgentState:
         # solo se ve el comentario que la persona escribio.
         return {**state, "response_text": ""}
 
+    if state.get("offer_suppressed"):
+        # Ya se le mando este link hace poco - no se repite ni se le
+        # contesta otra cosa.
+        return {**state, "response_text": ""}
+
+    if state.get("offer"):
+        # Venta por codigo: el mensaje es la propia oferta (imagen + link),
+        # no hace falta llamar al LLM. Va antes de skip_response: vender no
+        # depende de que la tienda haya configurado etiquetas.
+        return {**state, "response_text": state["offer"]["caption"]}
+
     if state.get("skip_response"):
         # La tienda todavia no creo ninguna etiqueta propia - el comentario
         # queda anotado como "sin_clasificar" en Chatwoot, pero no se le
@@ -327,5 +402,18 @@ def send_reply(state: AgentState) -> AgentState:
     user = state.get("tiktok_user")
     if not user or not user.get("phone") or not state.get("instance_name") or not state.get("response_text"):
         return state
+
+    offer = state.get("offer")
+    if offer and offer.get("image_url"):
+        try:
+            evolution_client.send_media(
+                state["instance_name"], user["phone"], offer["image_url"], "image", offer["caption"]
+            )
+            return state
+        except httpx.HTTPError:
+            # Si la imagen no se puede enviar (URL rota, etc.) igual sale el
+            # link de pago como texto - lo importante es que pueda comprar.
+            logger.exception("send_media fallo para store_id=%s, se envia solo el texto", state.get("store_id"))
+
     evolution_client.send_text(state["instance_name"], user["phone"], state["response_text"])
     return state

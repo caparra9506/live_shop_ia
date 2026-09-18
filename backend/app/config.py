@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     ai_backend_public_url: str = "http://liveshop-ai-backend:8000"
 
     liveshop_backend_url: str = "http://liveshop-backend:3000"
+    # Dominio publico de LiveShop - base de los links de pago (checkout) que se
+    # mandan a los clientes por WhatsApp.
+    liveshop_public_url: str = "https://liveshop.com.co"
 
     chatwoot_base_url: str = "http://liveshop-chatwoot:3000"
     chatwoot_api_token: str = ""

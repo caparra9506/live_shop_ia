@@ -23,4 +23,10 @@ class AgentState(TypedDict, total=False):
     store: dict | None
     tiktok_user: dict | None  # None si no esta registrado - sin telefono conocido
     products: list[dict]
+    # Oferta de venta automatica: el comentario trae el codigo de un producto
+    # disponible y el cliente esta registrado -> imagen + link de pago.
+    offer: dict | None
+    # El codigo coincide pero ya se le mando ese link hace poco: no se repite
+    # ni se le responde otra cosa.
+    offer_suppressed: bool
     response_text: str

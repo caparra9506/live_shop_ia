@@ -43,6 +43,23 @@ def find_products(db: Session, store_id: int, query: str, limit: int = 5) -> lis
     return [dict(r) for r in rows]
 
 
+def list_store_products(db: Session, store_id: int) -> list[dict]:
+    """Catalogo de la tienda (solo lo necesario para detectar el codigo en un
+    comentario y armar la oferta) - de solo lectura."""
+    rows = db.execute(
+        text(
+            """
+            SELECT p.id, p.name, p.code, p.price, p.stock, p.inStock, p.imageUrl
+            FROM product p
+            INNER JOIN category c ON c.id = p.categoryId
+            WHERE c.storeId = :store_id
+            """
+        ),
+        {"store_id": store_id},
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def list_ai_draft_logs(db: Session, limit: int = 100) -> list[dict]:
     """Registro de cada llamada a la IA de vision del panel de tienda (carga
     de productos con foto) - insertado por live_shop_back en su propia BD,
