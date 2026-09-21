@@ -94,13 +94,18 @@ class ContextTests(unittest.TestCase):
 
 
 def make_deps(reply="Cuesta $35.000 y está disponible.", store=True, api_key="k", llm_error=False):
-    calls = SimpleNamespace(invoke=[], log=[])
+    calls = SimpleNamespace(invoke=[], log=[], record=[], record_fails=False)
 
     def invoke(cfg, system, human):
         calls.invoke.append((system, human))
         if llm_error:
             raise RuntimeError("proveedor caido")
         return reply, 120, 20
+
+    def record(store_, username, message, reply):
+        if calls.record_fails:
+            raise RuntimeError("BD caida")
+        calls.record.append((username, message, reply))
 
     deps = RoomAgentDeps(
         find_store=lambda name: {"id": 1, "name": "Mitienda"} if store else None,
@@ -109,6 +114,7 @@ def make_deps(reply="Cuesta $35.000 y está disponible.", store=True, api_key="k
         get_config=lambda store_id: SimpleNamespace(ai_api_key=api_key, system_prompt="Eres Sofi."),
         invoke=invoke,
         log=lambda *args: calls.log.append(args),
+        record=record,
     )
     return deps, calls
 
@@ -152,6 +158,48 @@ class AgentFlowTests(unittest.TestCase):
         out = answer(deps, "Mitienda", "maria", None, "cuanto cuesta la platera")
         self.assertEqual((out["reply"], out["skipped"]), (None, "error_ia"))
         self.assertFalse(calls.log[0][4])  # success=False
+
+
+class TraceTests(unittest.TestCase):
+    def test_deja_lo_que_escribio_el_cliente_y_la_respuesta(self):
+        deps, calls = make_deps()
+        answer(deps, "Mitienda", "maria", "Maria", "cuanto cuesta la platera?")
+        self.assertEqual(calls.record, [("maria", "cuanto cuesta la platera?", "Cuesta $35.000 y está disponible.")])
+
+    def test_deja_la_traza_aunque_el_asistente_no_responda(self):
+        deps, calls = make_deps(reply="NO_RESPONDER")
+        answer(deps, "Mitienda", "maria", None, "que lindo se ve todo")
+        self.assertEqual(calls.record, [("maria", "que lindo se ve todo", None)])
+
+    def test_un_saludo_tambien_queda_en_la_conversacion(self):
+        deps, calls = make_deps()
+        answer(deps, "Mitienda", "maria", None, "hola")
+        self.assertEqual(calls.record, [("maria", "hola", None)])
+        self.assertEqual(calls.invoke, [])  # sigue sin gastar llamada de IA
+
+    def test_sin_ia_configurada_igual_queda_la_traza(self):
+        deps, calls = make_deps(api_key="")
+        answer(deps, "Mitienda", "maria", None, "cuanto cuesta la platera")
+        self.assertEqual(calls.record, [("maria", "cuanto cuesta la platera", None)])
+
+    def test_si_la_ia_falla_igual_queda_lo_que_escribio(self):
+        deps, calls = make_deps(llm_error=True)
+        answer(deps, "Mitienda", "maria", None, "cuanto cuesta la platera")
+        self.assertEqual(calls.record, [("maria", "cuanto cuesta la platera", None)])
+
+    def test_tienda_desconocida_o_mensaje_vacio_no_dejan_traza(self):
+        deps, calls = make_deps(store=False)
+        answer(deps, "Otra", "maria", None, "cuanto cuesta la platera")
+        deps2, calls2 = make_deps()
+        answer(deps2, "Mitienda", "maria", None, "   ")
+        self.assertEqual(calls.record + calls2.record, [])
+
+    def test_si_falla_dejar_la_traza_la_respuesta_igual_sale(self):
+        deps, calls = make_deps()
+        calls.record_fails = True
+        with self.assertLogs("app.room_agent", level="ERROR"):
+            out = answer(deps, "Mitienda", "maria", None, "cuanto cuesta la platera")
+        self.assertEqual(out["reply"], "Cuesta $35.000 y está disponible.")
 
 
 if __name__ == "__main__":

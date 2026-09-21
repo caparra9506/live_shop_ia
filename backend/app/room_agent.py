@@ -21,6 +21,9 @@ class RoomAgentDeps:
     get_config: Callable[[int], Any]  # objeto con .system_prompt y .ai_api_key
     invoke: Callable[[Any, str, str], tuple[str, int, int]]  # (texto, tokens_in, tokens_out)
     log: Callable[..., None]
+    # Deja lo que escribio el cliente y lo que se le respondio en SU conversacion
+    # (la misma de sus comentarios de TikTok): la traza que ven Prospeccion y WhatsApp.
+    record: Callable[[dict, str, str, str | None], None]
 
 
 def _result(reply: str | None, visibility: str, skipped: str | None = None) -> dict:
@@ -33,12 +36,26 @@ def answer(deps: RoomAgentDeps, store_name: str, username: str,
     visibility = room.classify_visibility(message)
     if not message:
         return _result(None, visibility, "vacio")
-    if room.should_skip(message):
-        return _result(None, visibility, "sin_respuesta_necesaria")
 
     store = deps.find_store(store_name)
     if not store:
         return _result(None, visibility, "tienda_desconocida")
+
+    result = _respond(deps, store, username, customer_name, message, visibility)
+
+    # La traza se deja SIEMPRE (haya respuesta o no): que el asistente calle no
+    # significa que el vendedor no deba ver lo que el cliente escribio.
+    try:
+        deps.record(store, username, message, result["reply"])
+    except Exception:
+        logger.exception("No se pudo dejar la traza de la sala (store_id=%s)", store["id"])
+    return result
+
+
+def _respond(deps: RoomAgentDeps, store: dict, username: str, customer_name: str | None,
+             message: str, visibility: str) -> dict:
+    if room.should_skip(message):
+        return _result(None, visibility, "sin_respuesta_necesaria")
 
     cfg = deps.get_config(store["id"])
     if not getattr(cfg, "ai_api_key", ""):

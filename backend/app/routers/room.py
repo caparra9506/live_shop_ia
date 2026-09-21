@@ -50,6 +50,28 @@ def _real_deps() -> RoomAgentDeps:
             prompt_tokens, completion_tokens,
         )
 
+    def record(store, username, message, reply):
+        from app.db import AiSessionLocal
+        from app.models import Conversation, Message
+
+        db = AiSessionLocal()
+        try:
+            # Mismo hilo que sus comentarios de TikTok: (tienda, usuario de TikTok)
+            conversation = (
+                db.query(Conversation).filter_by(store_id=store["id"], contact_phone=username).first()
+            )
+            if not conversation:
+                conversation = Conversation(store_id=store["id"], contact_phone=username)
+                db.add(conversation)
+                db.commit()
+                db.refresh(conversation)
+            db.add(Message(conversation_id=conversation.id, direction="in", body=message))
+            if reply:
+                db.add(Message(conversation_id=conversation.id, direction="out", body=reply))
+            db.commit()
+        finally:
+            db.close()
+
     return RoomAgentDeps(
         find_store=with_db(find_store_by_name),
         list_catalog=with_db(list_store_products),
@@ -57,6 +79,7 @@ def _real_deps() -> RoomAgentDeps:
         get_config=get_store_ai_config,
         invoke=invoke,
         log=log,
+        record=record,
     )
 
 
