@@ -34,6 +34,10 @@ class Settings(BaseSettings):
 
     jwt_secret: str = "abc123"
 
+    # Clave compartida con el backend NestJS para los endpoints internos
+    # (sala del live). Vacia = esos endpoints quedan desactivados.
+    internal_api_key: str = ""
+
     openai_api_key: str = ""
 
     # Proveedor/API key que usa el agente del live para clasificar y responder

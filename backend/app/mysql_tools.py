@@ -3,7 +3,7 @@ nodos reales del workflow COMPRE_PUES_SISTEMA_N8N en n8n (SQL extraido
 directo de la definicion del workflow, no adivinado).
 Cualquier escritura debe ir por la API del backend NestJS, no por aqui."""
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 
@@ -49,7 +49,7 @@ def list_store_products(db: Session, store_id: int) -> list[dict]:
     rows = db.execute(
         text(
             """
-            SELECT p.id, p.name, p.code, p.price, p.stock, p.inStock, p.imageUrl
+            SELECT p.id, p.name, p.code, p.price, p.stock, p.inStock, p.imageUrl, p.description
             FROM product p
             INNER JOIN category c ON c.id = p.categoryId
             WHERE c.storeId = :store_id
@@ -92,3 +92,28 @@ def find_tiktok_user(db: Session, tiktok_username: str) -> dict | None:
         {"username": tiktok_username},
     ).mappings().first()
     return dict(row) if row else None
+
+
+def list_variants(db: Session, product_ids: list[int]) -> dict[int, list[dict]]:
+    """Colores/tallas (y su stock) de esos productos, para contestar "lo
+    tienen en negro?". Devuelve {} si no hay ids."""
+    if not product_ids:
+        return {}
+    rows = db.execute(
+        text(
+            """
+            SELECT pv.productId AS product_id, c.name AS color, s.name AS size, pv.stock AS stock
+            FROM product_variant pv
+            LEFT JOIN color c ON c.id = pv.colorId
+            LEFT JOIN size s ON s.id = pv.sizeId
+            WHERE pv.productId IN :ids
+            """
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": list(product_ids)},
+    ).mappings().all()
+    out: dict[int, list[dict]] = {}
+    for row in rows:
+        out.setdefault(row["product_id"], []).append(
+            {"color": row["color"], "size": row["size"], "stock": row["stock"]}
+        )
+    return out
