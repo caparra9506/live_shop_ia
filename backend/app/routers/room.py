@@ -4,6 +4,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from app.config import settings
+from app.cart_saved import CartSavedDeps, deliver
 from app.room_agent import RoomAgentDeps, answer
 
 router = APIRouter(prefix="/webhooks", tags=["room"])
@@ -59,13 +60,61 @@ def _real_deps() -> RoomAgentDeps:
     )
 
 
+def _check_internal_key(provided: str | None) -> None:
+    if not settings.internal_api_key:
+        raise HTTPException(status_code=503, detail="Sala del live no habilitada en este servidor")
+    if not provided or not hmac.compare_digest(provided, settings.internal_api_key):
+        raise HTTPException(status_code=401, detail="No autorizado")
+
+
 @router.post("/room-message")
 def room_message(body: RoomMessageIn, x_internal_key: str | None = Header(default=None)):
     """Un cliente escribio en la sala del live. Lo llama SOLO el backend
     NestJS (clave compartida). Devuelve {reply, visibility, skipped}: `reply`
     null significa que no hay nada que publicar."""
-    if not settings.internal_api_key:
-        raise HTTPException(status_code=503, detail="Sala del live no habilitada en este servidor")
-    if not x_internal_key or not hmac.compare_digest(x_internal_key, settings.internal_api_key):
-        raise HTTPException(status_code=401, detail="No autorizado")
+    _check_internal_key(x_internal_key)
     return answer(_real_deps(), body.storeName, body.username, body.customerName, body.message)
+
+
+class CartSavedItem(BaseModel):
+    name: str
+    quantity: int = 1
+
+
+class CartSavedIn(BaseModel):
+    storeName: str
+    phone: str
+    customerName: str | None = None
+    roomUrl: str
+    items: list[CartSavedItem] = []
+
+
+@router.post("/cart-saved")
+def cart_saved(body: CartSavedIn, x_internal_key: str | None = Header(default=None)):
+    """Termino el live y el pedido de este cliente quedo guardado: un WhatsApp
+    con su link de sala. Lo llama SOLO el backend NestJS (clave compartida)."""
+    _check_internal_key(x_internal_key)
+
+    from app.db import AiSessionLocal, LiveshopSessionLocal
+    from app import evolution_client
+    from app.models import WhatsappInstance
+    from app.mysql_tools import find_store_by_name
+
+    def find_instance(store_name: str):
+        liveshop_db = LiveshopSessionLocal()
+        try:
+            store = find_store_by_name(liveshop_db, store_name)
+        finally:
+            liveshop_db.close()
+        if not store:
+            return None
+        ai_db = AiSessionLocal()
+        try:
+            instance = ai_db.query(WhatsappInstance).filter_by(store_id=store["id"]).first()
+            return instance.instance_name if instance else None
+        finally:
+            ai_db.close()
+
+    deps = CartSavedDeps(find_instance=find_instance, send_text=evolution_client.send_text)
+    return deliver(deps, body.storeName, body.phone, body.customerName, body.roomUrl,
+                   [item.model_dump() for item in body.items])

@@ -44,6 +44,12 @@ def build_checkout_url(base_url: str, store_name: str, product_id: int, user_id:
     )
 
 
+def mentions_offer(body: str, product_id: int) -> bool:
+    """True si el mensaje ya trae el link de ese producto, sea el de pago
+    (?productId=12&...) o el de la sala (?p=12). 12 no coincide con 123."""
+    return re.search(rf"[?&](?:productId|p)={int(product_id)}(?!\d)", body or "") is not None
+
+
 def format_price(price) -> str:
     """4000 -> '$4.000' (separador de miles colombiano)."""
     value = int(Decimal(str(price or 0)))
@@ -61,3 +67,12 @@ def build_offer_caption(customer_name: str, product_name: str, price, checkout_u
 
 def is_available(product: dict) -> bool:
     return bool(product.get("inStock")) and (product.get("stock") or 0) > 0
+
+
+def build_room_offer_caption(customer_name: str, product_name: str, price, room_url: str) -> str:
+    return (
+        f"Hola {customer_name} 👋\n"
+        f"Este es el producto que te interesa: *{product_name}*\n"
+        f"Precio: {format_price(price)}\n\n"
+        f"Entra a tu sala del live para comprarlo y seguir el chat 👉 {room_url}"
+    )

@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # (sala del live). Vacia = esos endpoints quedan desactivados.
     internal_api_key: str = ""
 
+    # Interruptor: la oferta de venta manda el link de la SALA del live (con el
+    # producto abierto) en vez del link de pago directo. Apagado por defecto.
+    room_links_enabled: bool = False
+
     openai_api_key: str = ""
 
     # Proveedor/API key que usa el agente del live para clasificar y responder

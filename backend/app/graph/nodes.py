@@ -19,7 +19,7 @@ from app.db import LiveshopSessionLocal
 from app.graph.state import AgentState
 from app.config import settings
 from app.mysql_tools import find_store_by_name, find_products, find_tiktok_user, list_store_products
-from app import sales
+from app import room_link, sales
 from app.settings_store import get_store_ai_config, StoreAiSettings
 from app import evolution_client, chatwoot_client
 
@@ -223,17 +223,18 @@ def _recently_offered(conversation_id: int | None, product_id: int) -> bool:
     since = datetime.now(timezone.utc) - timedelta(minutes=OFFER_DEDUPE_MINUTES)
     db = AiSessionLocal()
     try:
-        return (
-            db.query(Message.id)
+        recent = (
+            db.query(Message.body)
             .filter(
                 Message.conversation_id == conversation_id,
                 Message.direction == "out",
                 Message.created_at >= since,
-                Message.body.like(f"%productId={product_id}&%"),
             )
-            .first()
-            is not None
+            .limit(50)
+            .all()
         )
+        # Sirve para el link de pago (?productId=) y para el de la sala (?p=)
+        return any(sales.mentions_offer(body, product_id) for (body,) in recent)
     finally:
         db.close()
 
@@ -268,14 +269,20 @@ def search_products(state: AgentState) -> AgentState:
             suppressed = True
         else:
             store_name = (state.get("store") or {}).get("name", state["store_name"])
+            customer = user.get("name") or state["username"]
             url = sales.build_checkout_url(settings.liveshop_public_url, store_name, by_code["id"], user["id"])
+            caption = sales.build_offer_caption(customer, by_code["name"], by_code["price"], url)
+            # Con el interruptor encendido la oferta lleva el link de la sala; si
+            # no se puede obtener, sale el link de pago de siempre.
+            room_url = room_link.fetch_room_link(user["id"], by_code["id"])
+            if room_url:
+                url = room_url
+                caption = sales.build_room_offer_caption(customer, by_code["name"], by_code["price"], room_url)
             offer = {
                 "product_id": by_code["id"],
                 "image_url": by_code.get("imageUrl"),
                 "checkout_url": url,
-                "caption": sales.build_offer_caption(
-                    user.get("name") or state["username"], by_code["name"], by_code["price"], url
-                ),
+                "caption": caption,
             }
     return {**state, "products": products, "offer": offer, "offer_suppressed": suppressed}
 
