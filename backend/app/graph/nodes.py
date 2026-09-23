@@ -8,6 +8,7 @@ Cada tienda tiene su propio proveedor/API key de IA y su propio prompt
 un solo agente compartido entre tiendas."""
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -43,7 +44,12 @@ SIN_CLASIFICAR = "sin_clasificar"
 PRICING_PER_1M = {
     "openai": (0.15, 0.60),
     "deepseek": (0.30, 1.20),
+    "jev": (0.042, 0.0),  # TypeSafe: la salida no se cobra
 }
+
+# Por debajo de esto la respuesta de Jev se trata como "no encaja" (valor
+# sugerido por la doc de TypeSafe para no rutear automaticamente).
+JEV_MIN_CONFIDENCE = 0.3
 
 
 def _extract_usage(result) -> tuple[int, int]:
@@ -160,6 +166,64 @@ def _add_usage_to_log(log_id: int | None, ai_provider: str | None,
         db.close()
 
 
+def _classifier_cfg(cfg: StoreAiSettings) -> StoreAiSettings:
+    """La clasificacion de comentarios va SIEMPRE con DeepSeek: la key propia
+    de la tienda si ya usa DeepSeek, si no la key global de clasificacion.
+    Sin ninguna de las dos se queda con el proveedor de la tienda (mejor
+    clasificar con otro modelo que dejar todo sin clasificar)."""
+    if cfg.ai_provider == "deepseek" and cfg.ai_api_key:
+        return cfg
+    if settings.classifier_deepseek_api_key:
+        return replace(cfg, ai_provider="deepseek", ai_api_key=settings.classifier_deepseek_api_key)
+    logger.warning("Sin key de DeepSeek para clasificar (store_id=%s), se usa %s", cfg.store_id, cfg.ai_provider)
+    return cfg
+
+
+def _classify_with_llm(cfg: StoreAiSettings, comment: str, custom_labels: list[str]) -> tuple[str, int, int]:
+    options = ", ".join(custom_labels)
+    prompt = (
+        "Clasifica el siguiente comentario de un cliente en el live de TikTok de una "
+        f"tienda, en UNA de estas categorias exactas: {options}, {SIN_CLASIFICAR}. "
+        f"Usa '{SIN_CLASIFICAR}' solo si el comentario no encaja claramente en ninguna. "
+        "Responde solo con el nombre exacto de la categoria elegida, tal cual esta escrito arriba."
+    )
+    result = _build_llm(cfg).invoke([SystemMessage(content=prompt), HumanMessage(content=comment)])
+    prompt_tokens, completion_tokens = _extract_usage(result)
+    return result.content.strip(), prompt_tokens, completion_tokens
+
+
+def _classify_with_jev(comment: str, custom_labels: list[str]) -> tuple[str, int, int]:
+    """Clasifica con Jev (TypeSafe AI): una pregunta Choice tipada cuyas
+    opciones son las etiquetas de la tienda - siempre devuelve una de ellas
+    (nunca texto libre que haya que emparejar) mas su confianza."""
+    criteria: dict[str, str | None] = {label: None for label in custom_labels}
+    criteria[SIN_CLASIFICAR] = "El comentario no encaja claramente en ninguna de las otras categorias"
+    resp = httpx.post(
+        settings.typesafe_api_url,
+        headers={"Authorization": f"Bearer {settings.typesafe_api_key}"},
+        json={
+            "model": settings.typesafe_model,
+            "state": comment,
+            "questions": {
+                "categoria": {
+                    "type": "choice",
+                    "instructions": "Categoria de este comentario de un cliente en el live de TikTok de una tienda",
+                    "criteria": criteria,
+                },
+            },
+        },
+        timeout=5.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    answer = data["answers"]["categoria"]
+    usage = data.get("usage") or {}
+    chosen = answer["choice"]
+    if (answer.get("confidence") or 0) < JEV_MIN_CONFIDENCE:
+        chosen = SIN_CLASIFICAR
+    return chosen, usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+
+
 def classify_intent(state: AgentState) -> AgentState:
     """Ya NO clasifica en 3 categorias fijas (venta/queja/soporte) - usa las
     etiquetas LIBRES que la propia tienda haya creado (pestaña "Etiquetas",
@@ -169,7 +233,7 @@ def classify_intent(state: AgentState) -> AgentState:
     creo ninguna etiqueta, o ninguna encaja con el comentario, cae en
     "Nuevo contacto" - y si no hay NINGUNA etiqueta creada todavia, tampoco se
     le responde (skip_response) hasta que la tienda configure sus categorias."""
-    cfg = get_store_ai_config(state["store_id"])
+    cfg = _classifier_cfg(get_store_ai_config(state["store_id"]))
     custom_labels = [
         item["title"] for item in cfg.extra_labels
         if item.get("title") and item["title"] not in INTERNAL_LABELS
@@ -180,32 +244,34 @@ def classify_intent(state: AgentState) -> AgentState:
         _log_comment_ai(state, cfg.ai_provider, SIN_CLASIFICAR, no_registrado_text, True, True)
         return {**state, "intent": SIN_CLASIFICAR, "label_text": no_registrado_text, "skip_response": True}
 
-    options = ", ".join(custom_labels)
-    prompt = (
-        "Clasifica el siguiente comentario de un cliente en el live de TikTok de una "
-        f"tienda, en UNA de estas categorias exactas: {options}, {SIN_CLASIFICAR}. "
-        f"Usa '{SIN_CLASIFICAR}' solo si el comentario no encaja claramente en ninguna. "
-        "Responde solo con el nombre exacto de la categoria elegida, tal cual esta escrito arriba."
-    )
-    try:
-        llm = _build_llm(cfg)
-        result = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=state["comment"])])
-        chosen = result.content.strip()
-        prompt_tokens, completion_tokens = _extract_usage(result)
-    except Exception as e:
-        # Si la IA de esta tienda falla (key invalida, proveedor caido, etc.)
-        # el comentario igual debe quedar visible como "sin_clasificar" en vez
-        # de tumbar todo el webhook y perder el comentario por completo.
-        logger.exception("classify_intent fallo para store_id=%s", state.get("store_id"))
-        _log_comment_ai(state, cfg.ai_provider, SIN_CLASIFICAR, no_registrado_text, False, False, str(e))
-        return {**state, "intent": SIN_CLASIFICAR, "label_text": no_registrado_text, "skip_response": False}
+    chosen = None
+    provider = cfg.ai_provider
+    if settings.comment_classifier == "jev" and settings.typesafe_api_key:
+        try:
+            chosen, prompt_tokens, completion_tokens = _classify_with_jev(state["comment"], custom_labels)
+            provider = "jev"
+        except Exception:
+            # Jev caido/limitado: no se pierde el comentario, lo clasifica el
+            # LLM de la tienda como antes.
+            logger.exception("Jev fallo para store_id=%s, se usa el LLM de la tienda", state.get("store_id"))
+
+    if chosen is None:
+        try:
+            chosen, prompt_tokens, completion_tokens = _classify_with_llm(cfg, state["comment"], custom_labels)
+        except Exception as e:
+            # Si la IA de esta tienda falla (key invalida, proveedor caido, etc.)
+            # el comentario igual debe quedar visible como "sin_clasificar" en vez
+            # de tumbar todo el webhook y perder el comentario por completo.
+            logger.exception("classify_intent fallo para store_id=%s", state.get("store_id"))
+            _log_comment_ai(state, cfg.ai_provider, SIN_CLASIFICAR, no_registrado_text, False, False, str(e))
+            return {**state, "intent": SIN_CLASIFICAR, "label_text": no_registrado_text, "skip_response": False}
 
     matched = next((t for t in custom_labels if t.lower() == chosen.lower()), None)
     if matched:
-        log_id = _log_comment_ai(state, cfg.ai_provider, matched, matched, False, True,
+        log_id = _log_comment_ai(state, provider, matched, matched, False, True,
                                   prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
         return {**state, "intent": matched, "label_text": matched, "skip_response": False, "ai_log_id": log_id}
-    log_id = _log_comment_ai(state, cfg.ai_provider, SIN_CLASIFICAR, no_registrado_text, False, True,
+    log_id = _log_comment_ai(state, provider, SIN_CLASIFICAR, no_registrado_text, False, True,
                               prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
     return {**state, "intent": SIN_CLASIFICAR, "label_text": no_registrado_text, "skip_response": False, "ai_log_id": log_id}
 

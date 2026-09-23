@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     default_ai_provider: str = "openai"
     default_ai_api_key: str = ""
 
+    # Key de DeepSeek con la que se clasifican los comentarios del live de TODAS
+    # las tiendas (sin importar el proveedor que cada una use para responder).
+    # Si la tienda ya tiene su propia key de DeepSeek, se usa la de ella.
+    classifier_deepseek_api_key: str = ""
+
+    # Interruptor: quien clasifica los comentarios del live. "llm" (default) =
+    # el proveedor de cada tienda como siempre; "jev" = Jev de TypeSafe AI
+    # (Choice tipado, mas rapido/barato). Si Jev falla, cae al LLM de la tienda.
+    comment_classifier: str = "llm"
+    typesafe_api_key: str = ""
+    typesafe_api_url: str = "https://api.typesafe.ai/v1/systemone"
+    typesafe_model: str = "jev-latest"
+
     # Override para desarrollo local (ej. "sqlite:///./dev.db") en vez de armar
     # la URL de Postgres a partir de host/user/password - evita depender de
     # tener Docker/Postgres corriendo solo para probar en el laptop.
