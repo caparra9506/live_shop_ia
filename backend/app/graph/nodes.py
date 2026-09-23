@@ -179,15 +179,38 @@ def _classifier_cfg(cfg: StoreAiSettings) -> StoreAiSettings:
     return cfg
 
 
-def _classify_with_llm(cfg: StoreAiSettings, comment: str, custom_labels: list[str]) -> tuple[str, int, int]:
-    options = ", ".join(custom_labels)
-    prompt = (
-        "Clasifica el siguiente comentario de un cliente en el live de TikTok de una "
-        f"tienda, en UNA de estas categorias exactas: {options}, {SIN_CLASIFICAR}. "
-        f"Usa '{SIN_CLASIFICAR}' solo si el comentario no encaja claramente en ninguna. "
-        "Responde solo con el nombre exacto de la categoria elegida, tal cual esta escrito arriba."
+def classification_prompt(custom_labels: list[str]) -> str:
+    """Las etiquetas las inventa cada tienda (pueden no existir "venta" o
+    "queja"), asi que la guia describe INTENCIONES tipicas de un live de
+    ventas y el modelo las cruza con el significado del nombre de cada
+    etiqueta. Sin esta guia confundia preguntas de compra con quejas y
+    mandaba a sin_clasificar preguntas por tallas/medidas."""
+    options = "\n".join(f"- {label}" for label in custom_labels)
+    return (
+        "Clasificas comentarios que escriben los clientes durante el live de TikTok de una "
+        "tienda que vende productos en vivo (casi siempre ropa y accesorios).\n\n"
+        f"Etiquetas que creo la tienda:\n{options}\n- {SIN_CLASIFICAR}\n\n"
+        "Elige la etiqueta que mejor describa la INTENCION del comentario, segun lo que "
+        "significa el nombre de cada etiqueta. Guia:\n"
+        "- Interes de compra (etiqueta de venta/compra/pedido/interes si existe): preguntas por "
+        "precio, moneda, tallas, medidas, largo, color, material, stock, al por mayor, si tienen "
+        "cierto producto; pedidos como \"lo quiero\", \"mio\", \"yo\", un codigo o numero de "
+        "producto; y elogios a un producto (\"divina esa blusa\").\n"
+        "- Queja/reclamo: SOLO si el cliente reporta un problema real (pedido que no llego, "
+        "producto danado o equivocado, cobro mal, mala atencion). Una pregunta NO es una queja.\n"
+        "- Soporte/atencion/dudas: como comprar o pagar, envios, ubicacion de la tienda, "
+        "horarios, estado de un pedido.\n"
+        f"- {SIN_CLASIFICAR}: saludos, emojis, risas, charla sin relacion con la tienda o "
+        "comentarios sin una intencion clara. Ante una pregunta por un producto, NO uses "
+        f"{SIN_CLASIFICAR}.\n\n"
+        "Responde SOLO con el nombre exacto de una etiqueta de la lista, sin nada mas."
     )
-    result = _build_llm(cfg).invoke([SystemMessage(content=prompt), HumanMessage(content=comment)])
+
+
+def _classify_with_llm(cfg: StoreAiSettings, comment: str, custom_labels: list[str]) -> tuple[str, int, int]:
+    prompt = classification_prompt(custom_labels)
+    llm = _build_llm(cfg).bind(temperature=0)
+    result = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=comment)])
     prompt_tokens, completion_tokens = _extract_usage(result)
     return result.content.strip(), prompt_tokens, completion_tokens
 
