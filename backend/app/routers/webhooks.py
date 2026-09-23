@@ -6,7 +6,7 @@ from app.db import LiveshopSessionLocal, AiSessionLocal
 from app.models import WhatsappInstance, Conversation, Message
 from app.mysql_tools import find_store_by_name
 from app.graph.graph import get_graph
-from app import chatwoot_client
+from app import chatwoot_client, whatsapp_link
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,9 @@ async def evolution_webhook(instance_name: str, request: Request):
             .first()
         )
         if not conversation:
-            return {"ignored": "el numero no corresponde a ningun cliente registrado"}
+            return whatsapp_link.handle_unknown_sender(db, instance, phone, text, data.get("pushName"))
+        if conversation.contact_phone.startswith(whatsapp_link.PENDING_PREFIX):
+            return whatsapp_link.handle_pending(db, instance, conversation, text)
 
         db.add(Message(conversation_id=conversation.id, direction="in", body=text))
         db.commit()

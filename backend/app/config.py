@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # producto abierto) en vez del link de pago directo. Apagado por defecto.
     room_links_enabled: bool = False
 
+    # Interruptor: a un WhatsApp de un numero desconocido (durante el live o
+    # poco despues) se le pregunta su @ de TikTok para enlazarlo con sus
+    # comentarios del live. Apagado por defecto.
+    whatsapp_tiktok_link_enabled: bool = False
+
     openai_api_key: str = ""
 
     # Proveedor/API key que usa el agente del live para clasificar y responder

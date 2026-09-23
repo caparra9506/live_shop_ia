@@ -94,6 +94,29 @@ def find_tiktok_user(db: Session, tiktok_username: str) -> dict | None:
     return dict(row) if row else None
 
 
+def find_tiktok_user_by_phone(db: Session, store_id: int, phone: str) -> dict | None:
+    """Cliente de ESTA tienda con ese WhatsApp (tik_tok_user guarda 10
+    digitos sin 57, pero hay filas viejas con el numero completo)."""
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    short = digits[2:] if len(digits) == 12 and digits.startswith("57") else digits
+    row = db.execute(
+        text(
+            "SELECT id, tiktok, name, phone FROM tik_tok_user "
+            "WHERE storeId = :store_id AND phone IN (:short, :full) ORDER BY id DESC LIMIT 1"
+        ),
+        {"store_id": store_id, "short": short, "full": "57" + short},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+def store_live_info(db: Session, store_id: int) -> dict | None:
+    row = db.execute(
+        text("SELECT liveStatus, liveConnectedAt, liveDisconnectedAt FROM store WHERE id = :store_id"),
+        {"store_id": store_id},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
 def list_variants(db: Session, product_ids: list[int]) -> dict[int, list[dict]]:
     """Colores/tallas (y su stock) de esos productos, para contestar "lo
     tienen en negro?". Devuelve {} si no hay ids."""
