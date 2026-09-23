@@ -21,7 +21,12 @@ from app.config import settings
 from app.constants import REGISTERED_LABEL
 from app.db import LiveshopSessionLocal
 from app.models import Conversation, Message, WhatsappInstance
-from app.mysql_tools import find_tiktok_handles_by_name, find_tiktok_user_by_phone, store_live_info
+from app.mysql_tools import (
+    find_store_tiktok_user,
+    find_tiktok_handles_by_name,
+    find_tiktok_user_by_phone,
+    store_live_info,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,16 @@ NOT_FOUND_TEXT = (
 CONFIRM_TEXT = (
     "¿Eres tú? 👉 https://www.tiktok.com/@{username}\n"
     "Respóndenos *SÍ* para confirmar, o escríbenos tu usuario correcto."
+)
+CONFIRM_NEW_TEXT = (
+    "Todavía no te vemos en los comentarios del live 👀 ¿Este es tu perfil? 👉 "
+    "https://www.tiktok.com/@{username}\n"
+    "Respóndenos *SÍ* y lo guardamos para reconocerte en los próximos lives."
+)
+SAVED_TEXT = (
+    "¡Listo, @{username}! Guardamos tu usuario 🙌 Si estás viendo el live, escríbenos "
+    "un comentario allá con lo que te gustó y te atendemos por aquí. "
+    "En los próximos lives ya te reconocemos."
 )
 RETRY_TEXT = "Entonces, ¿cuál es tu usuario de TikTok? (ej: @tuusuario)"
 AMBIGUOUS_TEXT = (
@@ -212,6 +227,9 @@ def _linkable_target(db: Session, pending: Conversation, username: str, similar:
     target = _find_tiktok_conversation(db, pending.store_id, username)
     if not target and similar:
         target = _find_similar_conversation(db, pending.store_id, username)
+        # Si ya se le propuso ese parecido y dijo que no, no se insiste.
+        if target and target.contact_phone.lower() in _proposed_before(db, pending):
+            target = None
     if not target or target.contact_phone.startswith(PENDING_PREFIX):
         return None
     if target.whatsapp_phone and target.whatsapp_phone != pending.whatsapp_phone:
@@ -235,13 +253,57 @@ def _proposed_username(db: Session, pending: Conversation) -> str | None:
     return match.group(1) if match else None
 
 
-def _try_link(db: Session, instance: WhatsappInstance, pending: Conversation, username: str) -> bool:
-    """Encontro a quien podria ser: le manda su perfil de TikTok para que
-    confirme. Todavia no enlaza ni registra nada."""
-    target = _linkable_target(db, pending, username, similar=True)
-    if not target:
+def _proposed_before(db: Session, pending: Conversation) -> set[str]:
+    bodies = (
+        db.query(Message.body)
+        .filter(Message.conversation_id == pending.id, Message.direction == "out")
+        .all()
+    )
+    return {m.group(1).lower() for (body,) in bodies for m in _PROPOSED.finditer(body)}
+
+
+def _taken_by_other_phone(store_id: int, username: str, whatsapp_phone: str) -> bool:
+    """El @ ya esta registrado en la tienda con otro WhatsApp."""
+    ls_db = LiveshopSessionLocal()
+    try:
+        user = find_store_tiktok_user(ls_db, store_id, username)
+    finally:
+        ls_db.close()
+    if not user or not user.get("phone"):
         return False
-    _send(db, instance, pending, CONFIRM_TEXT.format(username=target.contact_phone))
+    return evolution_client.normalize_phone(user["phone"]) != whatsapp_phone
+
+
+def _try_link(
+    db: Session, instance: WhatsappInstance, pending: Conversation, username: str, allow_new: bool = False
+) -> bool:
+    """Encontro a quien podria ser: le manda su perfil de TikTok para que
+    confirme. Todavia no enlaza ni registra nada. Con allow_new (escribio un
+    @ explicito) se le pregunta aunque no haya comentado en el live: al
+    confirmar se guarda su @ para reconocerlo en los proximos lives."""
+    target = _linkable_target(db, pending, username, similar=True)
+    if target:
+        _send(db, instance, pending, CONFIRM_TEXT.format(username=target.contact_phone))
+        return True
+    if not allow_new or _find_tiktok_conversation(db, pending.store_id, username):
+        return False
+    _send(db, instance, pending, CONFIRM_NEW_TEXT.format(username=username.lower()))
+    return True
+
+
+def _save_new_username(db: Session, instance: WhatsappInstance, pending: Conversation, username: str) -> bool:
+    """Confirmo un @ que todavia no comento en el live: la conversacion
+    temporal pasa a ser la de ese @ (asi sus comentarios futuros caen aqui) y
+    queda registrado en tik_tok_user con su WhatsApp."""
+    username = username.lower()
+    if _taken_by_other_phone(pending.store_id, username, pending.whatsapp_phone):
+        logger.warning("@%s ya esta registrado con otro WhatsApp (store_id=%s)", username, pending.store_id)
+        return False
+    pending.contact_phone = username
+    db.commit()
+    _mark_registered(pending)
+    _register_in_liveshop(pending.store_id, username, pending.whatsapp_phone, pending.contact_name)
+    _send(db, instance, pending, SAVED_TEXT.format(username=username))
     return True
 
 
@@ -249,7 +311,9 @@ def _confirm_link(db: Session, instance: WhatsappInstance, pending: Conversation
     """La persona dijo que si es ella: se une y se registra."""
     target = _linkable_target(db, pending, username, similar=False)
     if not target:
-        return False
+        if _find_tiktok_conversation(db, pending.store_id, username):
+            return False  # existe pero es de otro numero
+        return _save_new_username(db, instance, pending, username)
     target = _link(db, pending, target)
     _mark_registered(target)
     _register_in_liveshop(target.store_id, target.contact_phone, target.whatsapp_phone, target.contact_name)
@@ -317,7 +381,7 @@ def handle_unknown_sender(
 
     # "Hola, soy @fulana" en el primer mensaje: no hace falta preguntar.
     username = parse_username(text, allow_bare=False)
-    if username and _try_link(db, instance, pending, username):
+    if username and _try_link(db, instance, pending, username, allow_new=True):
         return {"ok": True, "confirming": username}
 
     _send(db, instance, pending, ASK_TEXT)
@@ -353,7 +417,7 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
         return {"ok": True, "pending": True}
 
     username = parse_username(text, allow_bare=True)
-    if username and _try_link(db, instance, pending, username):
+    if username and _try_link(db, instance, pending, username, allow_new="@" in text):
         return {"ok": True, "confirming": username}
 
     # Sin @: puede ser el nombre con el que sale en el live.

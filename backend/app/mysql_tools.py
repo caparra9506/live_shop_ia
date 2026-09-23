@@ -131,6 +131,14 @@ def find_tiktok_handles_by_name(db: Session, store_id: int, name: str, hours: in
     return list({r.lower(): r for r in rows if r}.values())
 
 
+def find_store_tiktok_user(db: Session, store_id: int, tiktok: str) -> dict | None:
+    row = db.execute(
+        text("SELECT id, tiktok, name, phone FROM tik_tok_user WHERE storeId = :store_id AND tiktok = :tiktok LIMIT 1"),
+        {"store_id": store_id, "tiktok": tiktok},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
 def store_live_info(db: Session, store_id: int) -> dict | None:
     row = db.execute(
         text("SELECT liveStatus, liveConnectedAt, liveDisconnectedAt FROM store WHERE id = :store_id"),
