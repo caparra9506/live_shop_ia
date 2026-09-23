@@ -53,6 +53,11 @@ NOT_FOUND_TEXT = (
     "No te encontramos entre los comentarios del live 🤔 "
     "¿Nos confirmas tu usuario de TikTok tal cual aparece en tu perfil? (ej: @tuusuario)"
 )
+CONFIRM_TEXT = (
+    "¿Eres tú? 👉 https://www.tiktok.com/@{username}\n"
+    "Respóndenos *SÍ* para confirmar, o escríbenos tu usuario correcto."
+)
+RETRY_TEXT = "Entonces, ¿cuál es tu usuario de TikTok? (ej: @tuusuario)"
 AMBIGUOUS_TEXT = (
     "Hay varias personas con ese nombre en el live 😅 "
     "¿Nos compartes tu usuario de TikTok? (ej: @tuusuario)"
@@ -60,6 +65,13 @@ AMBIGUOUS_TEXT = (
 
 _AT_USERNAME = re.compile(r"@([A-Za-z0-9_.]{2,24})")
 _BARE_USERNAME = re.compile(r"[A-Za-z0-9_.]{2,24}")
+_PROPOSED = re.compile(r"tiktok\.com/@([A-Za-z0-9_.]+)")
+_YES = re.compile(
+    r"^(s[ií]+|yes|correcto|exacto|claro|dale|ok|okay|as[ií] es|soy yo|es correcto|ese|esa|esa soy yo|👍|✅)\b",
+    re.IGNORECASE,
+)
+_YES_EMOJI = ("👍", "✅")
+_NO = re.compile(r"^(no|nop|nel|negativo|ese no|esa no)\b", re.IGNORECASE)
 _NAME_PREFIX = re.compile(r"^(hola[,!.\s]*)?(yo\s+)?(soy|me\s+llamo|mi\s+nombre\s+es|es)\s+", re.IGNORECASE)
 
 
@@ -196,16 +208,47 @@ def _link(db: Session, pending: Conversation, target: Conversation) -> Conversat
     return target
 
 
-def _try_link(db: Session, instance: WhatsappInstance, pending: Conversation, username: str) -> bool:
+def _linkable_target(db: Session, pending: Conversation, username: str, similar: bool) -> Conversation | None:
     target = _find_tiktok_conversation(db, pending.store_id, username)
-    if not target:
+    if not target and similar:
         target = _find_similar_conversation(db, pending.store_id, username)
     if not target or target.contact_phone.startswith(PENDING_PREFIX):
-        return False
+        return None
     if target.whatsapp_phone and target.whatsapp_phone != pending.whatsapp_phone:
         # Ya enlazado a otro numero: no se le quita a nadie su conversacion,
         # lo resuelve el vendedor.
         logger.warning("@%s ya esta enlazado a otro WhatsApp (store_id=%s)", username, pending.store_id)
+        return None
+    return target
+
+
+def _proposed_username(db: Session, pending: Conversation) -> str | None:
+    """@ que se le propuso en el ultimo mensaje automatico, si ese fue una
+    confirmacion ("¿Eres tu? tiktok.com/@...")."""
+    last_out = (
+        db.query(Message.body)
+        .filter(Message.conversation_id == pending.id, Message.direction == "out")
+        .order_by(Message.id.desc())
+        .first()
+    )
+    match = _PROPOSED.search(last_out[0]) if last_out else None
+    return match.group(1) if match else None
+
+
+def _try_link(db: Session, instance: WhatsappInstance, pending: Conversation, username: str) -> bool:
+    """Encontro a quien podria ser: le manda su perfil de TikTok para que
+    confirme. Todavia no enlaza ni registra nada."""
+    target = _linkable_target(db, pending, username, similar=True)
+    if not target:
+        return False
+    _send(db, instance, pending, CONFIRM_TEXT.format(username=target.contact_phone))
+    return True
+
+
+def _confirm_link(db: Session, instance: WhatsappInstance, pending: Conversation, username: str) -> bool:
+    """La persona dijo que si es ella: se une y se registra."""
+    target = _linkable_target(db, pending, username, similar=False)
+    if not target:
         return False
     target = _link(db, pending, target)
     _mark_registered(target)
@@ -275,7 +318,7 @@ def handle_unknown_sender(
     # "Hola, soy @fulana" en el primer mensaje: no hace falta preguntar.
     username = parse_username(text, allow_bare=False)
     if username and _try_link(db, instance, pending, username):
-        return {"ok": True, "linked": username}
+        return {"ok": True, "confirming": username}
 
     _send(db, instance, pending, ASK_TEXT)
     return {"ok": True, "asked_tiktok": True}
@@ -288,14 +331,30 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
     if not settings.whatsapp_tiktok_link_enabled:
         return {"ok": True, "pending": True}
 
+    # Las confirmaciones no cuentan para el tope: son respuesta a lo que dijo.
     bot_messages = (
         db.query(func.count(Message.id))
-        .filter(Message.conversation_id == pending.id, Message.direction == "out")
+        .filter(
+            Message.conversation_id == pending.id,
+            Message.direction == "out",
+            ~Message.body.contains("tiktok.com/@"),
+        )
         .scalar()
     )
+
+    proposed = _proposed_username(db, pending)
+    answer = text.strip()
+    if proposed and (_YES.match(answer) or answer.startswith(_YES_EMOJI)):
+        if _confirm_link(db, instance, pending, proposed):
+            return {"ok": True, "linked": proposed}
+    elif proposed and _NO.match(answer) and "@" not in answer:
+        if bot_messages < MAX_BOT_MESSAGES + 1:
+            _send(db, instance, pending, RETRY_TEXT)
+        return {"ok": True, "pending": True}
+
     username = parse_username(text, allow_bare=True)
     if username and _try_link(db, instance, pending, username):
-        return {"ok": True, "linked": username}
+        return {"ok": True, "confirming": username}
 
     # Sin @: puede ser el nombre con el que sale en el live.
     reply = NOT_FOUND_TEXT
@@ -303,7 +362,7 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
     if name:
         handles = _handles_by_name(db, pending.store_id, name)
         if len(handles) == 1 and _try_link(db, instance, pending, handles[0]):
-            return {"ok": True, "linked": handles[0], "by_name": name}
+            return {"ok": True, "confirming": handles[0], "by_name": name}
         if len(handles) > 1:
             reply = AMBIGUOUS_TEXT
 
@@ -314,8 +373,8 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
 
 def link_pending_on_comment(db: Session, store_id: int, username: str) -> str | None:
     """Llega un comentario del live de @username: si alguien por WhatsApp dio
-    ese @ (o uno muy parecido) antes de comentar y quedo sin enlazar, se une
-    ahora. Devuelve el WhatsApp enlazado o None."""
+    ese @ (o uno muy parecido) antes de comentar y quedo sin enlazar, se le
+    pide confirmar ahora. Devuelve el WhatsApp al que se le pregunto o None."""
     if not settings.whatsapp_tiktok_link_enabled:
         return None
     pendings = (
@@ -342,6 +401,8 @@ def link_pending_on_comment(db: Session, store_id: int, username: str) -> str | 
             given = given.lower()
             if given != wanted and SequenceMatcher(None, given, wanted).ratio() < SIMILAR_MIN_RATIO:
                 continue
+            if (_proposed_username(db, pending) or "").lower() == wanted:
+                break  # ya se le pregunto por este @
             phone = pending.whatsapp_phone
             if _try_link(db, instance, pending, username):
                 return phone
