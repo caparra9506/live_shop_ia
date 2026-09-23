@@ -20,7 +20,7 @@ from app.config import settings
 from app.constants import REGISTERED_LABEL
 from app.db import LiveshopSessionLocal
 from app.models import Conversation, Message, WhatsappInstance
-from app.mysql_tools import find_tiktok_user_by_phone, store_live_info
+from app.mysql_tools import find_tiktok_handles_by_name, find_tiktok_user_by_phone, store_live_info
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +38,22 @@ MAX_BOT_MESSAGES = 2
 
 ASK_TEXT = (
     "¡Hola! 👋 Gracias por escribirnos. Para ayudarte con lo que viste en el live, "
-    "¿nos compartes tu usuario de TikTok? (ej: @tuusuario)"
+    "¿nos compartes tu usuario de TikTok (ej: @tuusuario) o el nombre con el que "
+    "apareces en el live?"
 )
 FOUND_TEXT = "¡Listo, @{username}! Ya te encontramos 🙌 En un momento te ayudamos con lo que pediste en el live."
 NOT_FOUND_TEXT = (
-    "No encontramos a @{username} entre los comentarios del live 🤔 "
-    "¿Nos confirmas tu usuario de TikTok tal cual aparece en tu perfil?"
+    "No te encontramos entre los comentarios del live 🤔 "
+    "¿Nos confirmas tu usuario de TikTok tal cual aparece en tu perfil? (ej: @tuusuario)"
+)
+AMBIGUOUS_TEXT = (
+    "Hay varias personas con ese nombre en el live 😅 "
+    "¿Nos compartes tu usuario de TikTok? (ej: @tuusuario)"
 )
 
 _AT_USERNAME = re.compile(r"@([A-Za-z0-9_.]{2,24})")
 _BARE_USERNAME = re.compile(r"[A-Za-z0-9_.]{2,24}")
+_NAME_PREFIX = re.compile(r"^(hola[,!.\s]*)?(yo\s+)?(soy|me\s+llamo|mi\s+nombre\s+es|es)\s+", re.IGNORECASE)
 
 
 def parse_username(text: str, allow_bare: bool) -> str | None:
@@ -60,6 +66,17 @@ def parse_username(text: str, allow_bare: bool) -> str | None:
     if allow_bare and _BARE_USERNAME.fullmatch(candidate) and any(ch.isalpha() for ch in candidate):
         return candidate.rstrip(".")
     return None
+
+
+def parse_name(text: str) -> str | None:
+    """Nombre visible de TikTok escrito a mano: "Camilo Ochoa", "soy Niqui 🌸".
+    Solo frases cortas; un mensaje largo no es un nombre."""
+    candidate = _NAME_PREFIX.sub("", text.strip())
+    candidate = re.sub(r"[%_\\]", "", candidate)  # comodines de LIKE
+    candidate = candidate.strip(" \t\n.,;:!¡?¿\"'")
+    if not 3 <= len(candidate) <= 60 or len(candidate.split()) > 5:
+        return None
+    return candidate if any(ch.isalpha() for ch in candidate) else None
 
 
 def live_recently_active(store_id: int) -> bool:
@@ -159,6 +176,20 @@ def _try_link(db: Session, instance: WhatsappInstance, pending: Conversation, us
     return True
 
 
+def _handles_by_name(db: Session, store_id: int, name: str) -> list[str]:
+    """@ del live cuyo nombre visible coincide y que tienen conversacion de
+    comentarios en esta tienda."""
+    ls_db = LiveshopSessionLocal()
+    try:
+        handles = find_tiktok_handles_by_name(ls_db, store_id, name)
+    except Exception:
+        logger.exception("No se pudo buscar por nombre %r (store_id=%s)", name, store_id)
+        return []
+    finally:
+        ls_db.close()
+    return [h for h in handles if _find_tiktok_conversation(db, store_id, h)]
+
+
 def handle_unknown_sender(
     db: Session, instance: WhatsappInstance, phone: str, text: str, push_name: str | None
 ) -> dict:
@@ -228,6 +259,16 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
     if username and _try_link(db, instance, pending, username):
         return {"ok": True, "linked": username}
 
+    # Sin @: puede ser el nombre con el que sale en el live.
+    reply = NOT_FOUND_TEXT
+    name = None if "@" in text else parse_name(text)
+    if name:
+        handles = _handles_by_name(db, pending.store_id, name)
+        if len(handles) == 1 and _try_link(db, instance, pending, handles[0]):
+            return {"ok": True, "linked": handles[0], "by_name": name}
+        if len(handles) > 1:
+            reply = AMBIGUOUS_TEXT
+
     if bot_messages < MAX_BOT_MESSAGES:
-        _send(db, instance, pending, NOT_FOUND_TEXT.format(username=username) if username else ASK_TEXT)
+        _send(db, instance, pending, reply)
     return {"ok": True, "pending": True}

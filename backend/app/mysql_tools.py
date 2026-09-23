@@ -109,6 +109,28 @@ def find_tiktok_user_by_phone(db: Session, store_id: int, phone: str) -> dict | 
     return dict(row) if row else None
 
 
+def find_tiktok_handles_by_name(db: Session, store_id: int, name: str, hours: int = 36) -> list[str]:
+    """@ de TikTok (sin arroba) cuyo nombre visible se parece a `name`: el que
+    vio la extension en el chat del live reciente (live_capture_comment) o el
+    que dejo al registrarse (tik_tok_user). La collation de MySQL ya ignora
+    mayusculas y tildes. Puede devolver varios: decide quien llama."""
+    rows = db.execute(
+        text(
+            """
+            SELECT DISTINCT tiktokHandle AS tiktok FROM live_capture_comment
+            WHERE storeId = :store_id AND tiktokHandle IS NOT NULL
+              AND displayName LIKE :name
+              AND capturedAt >= NOW() - INTERVAL :hours HOUR
+            UNION
+            SELECT DISTINCT tiktok FROM tik_tok_user
+            WHERE storeId = :store_id AND name LIKE :name
+            """
+        ),
+        {"store_id": store_id, "name": f"%{name}%", "hours": hours},
+    ).scalars().all()
+    return list({r.lower(): r for r in rows if r}.values())
+
+
 def store_live_info(db: Session, store_id: int) -> dict | None:
     row = db.execute(
         text("SELECT liveStatus, liveConnectedAt, liveDisconnectedAt FROM store WHERE id = :store_id"),
