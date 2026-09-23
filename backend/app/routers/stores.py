@@ -172,9 +172,15 @@ def _create_chatwoot_account(store_id: int, store_name: str) -> None:
         store_id, chatwoot_account_id=account_id, chatwoot_api_token=token, chatwoot_inbox_id=inbox_id
     )
 
-    # OJO: a proposito NO se sincronizan etiquetas aca - la cuenta debe
-    # arrancar en 0 y es la tienda quien las crea desde la pestaña
-    # "Etiquetas" ("+ Agregar"), no algo que se le imponga de una.
+    # Las etiquetas NO dependen de Chatwoot: la tienda las crea antes (desde
+    # Prospeccion) y al conectar WhatsApp se copian las que ya tenga. Solo
+    # las libres de la tienda - las 4 fijas viejas no se imponen.
+    extra_labels = get_store_ai_config(store_id).extra_labels
+    if extra_labels:
+        try:
+            chatwoot_client.sync_labels(store_id, {}, extra_labels)
+        except httpx.HTTPError:
+            pass  # la cuenta queda creada igual; se sincronizan al editar etiquetas
 
 
 def _auto_provision_chatwoot_if_needed(store_id: int) -> None:

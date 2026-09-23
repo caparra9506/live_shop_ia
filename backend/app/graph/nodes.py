@@ -21,7 +21,7 @@ from app.graph.state import AgentState
 from app.config import settings
 from app.mysql_tools import find_store_by_name, find_products, find_tiktok_user, list_store_products
 from app import room_link, sales
-from app.labels import fill_empty_label
+from app.labels import apply_classified_label
 from app.settings_store import get_store_ai_config, StoreAiSettings
 from app import evolution_client, chatwoot_client
 
@@ -354,19 +354,25 @@ def search_products(state: AgentState) -> AgentState:
     return {**state, "products": products, "offer": offer, "offer_suppressed": suppressed}
 
 
-def _label_locally(state: AgentState) -> None:
+def _label_locally(state: AgentState, fallback_label: str) -> str | None:
+    """Etiqueta la conversacion en NUESTRA BD (la del tablero de Prospeccion)
+    y devuelve la etiqueta con la que quedo - Chatwoot, si la tienda lo tiene,
+    solo refleja esta misma etiqueta."""
+    label = state.get("label_text") or state.get("intent")
     if not state.get("conversation_id"):
-        return
+        return label
     from app.db import AiSessionLocal
     from app.models import Conversation
 
     db = AiSessionLocal()
     try:
         conversation = db.query(Conversation).filter_by(id=state["conversation_id"]).first()
-        if fill_empty_label(conversation, state.get("label_text") or state.get("intent")):
+        if apply_classified_label(conversation, label, fallback_label):
             db.commit()
+        return (conversation.current_label if conversation else None) or label
     except Exception:
         logger.exception("No se pudo etiquetar la conversacion %s", state.get("conversation_id"))
+        return label
     finally:
         db.close()
 
@@ -378,12 +384,11 @@ def route_to_chatwoot(state: AgentState) -> AgentState:
     if not state.get("store_id"):
         return state
 
-    # La etiqueta local va SIEMPRE (no solo con Chatwoot): el tablero de
-    # Prospeccion agrupa por ella y una tienda sin Chatwoot aprovisionado
-    # dejaba todas sus conversaciones sin etiqueta (tablero vacio).
-    _label_locally(state)
-
+    # La etiqueta local va SIEMPRE y es la fuente de verdad (no depende de
+    # Chatwoot ni de WhatsApp): el tablero de Prospeccion agrupa por ella.
     cfg = get_store_ai_config(state["store_id"])
+    label = _label_locally(state, cfg.labels.get("no_registrado", "Nuevo contacto"))
+
     if not cfg.chatwoot_account_id or not cfg.chatwoot_inbox_id:
         return state  # tienda sin Chatwoot aprovisionado todavia
 
@@ -400,7 +405,6 @@ def route_to_chatwoot(state: AgentState) -> AgentState:
         if not conversation:
             conversation = chatwoot_client.create_conversation(state["store_id"], contact_id, cfg.chatwoot_inbox_id)
 
-        label = state.get("label_text") or state["intent"]
         chatwoot_client.set_labels(state["store_id"], conversation["id"], [label])
 
         if state.get("conversation_id"):
@@ -412,10 +416,6 @@ def route_to_chatwoot(state: AgentState) -> AgentState:
                 local_conv = db.query(Conversation).filter_by(id=state["conversation_id"]).first()
                 if local_conv:
                     local_conv.chatwoot_conversation_id = conversation["id"]
-                    # Se guarda el texto real (no el intent interno) - asi
-                    # "sin_clasificar" y "no_registrado" caen bajo la MISMA
-                    # columna "Nuevo contacto" en el panel, en vez de dos.
-                    local_conv.current_label = label
                     db.commit()
             finally:
                 db.close()
