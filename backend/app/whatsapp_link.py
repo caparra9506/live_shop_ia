@@ -38,9 +38,11 @@ PENDING_PREFIX = "wa:"
 # escribe al rato de ver el live).
 LINK_WINDOW_HOURS = 12
 
-# Mensajes automaticos maximos a un mismo numero sin enlazar: la pregunta y un
-# reintento. Despues queda para que el vendedor lo atienda a mano.
+# Mensajes automaticos maximos a un mismo numero sin enlazar dentro de
+# BOT_WINDOW_MINUTES: la pregunta y un reintento. Pasado ese rato, si vuelve a
+# escribir, se le pregunta de nuevo (antes se quedaba callado para siempre).
 MAX_BOT_MESSAGES = 2
+BOT_WINDOW_MINUTES = 20
 
 # Un @ mal escrito ("artesaniagenial" por "artesaniasgeniales") se acepta si se
 # parece asi de mucho a uno solo de los que comentaron en el live reciente.
@@ -402,6 +404,7 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
             Message.conversation_id == pending.id,
             Message.direction == "out",
             ~Message.body.contains("tiktok.com/@"),
+            Message.created_at >= datetime.utcnow() - timedelta(minutes=BOT_WINDOW_MINUTES),
         )
         .scalar()
     )
@@ -421,7 +424,8 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
         return {"ok": True, "confirming": username}
 
     # Sin @: puede ser el nombre con el que sale en el live.
-    reply = NOT_FOUND_TEXT
+    # Si hace rato no le escribimos, se arranca de nuevo con la pregunta.
+    reply = NOT_FOUND_TEXT if bot_messages else ASK_TEXT
     name = None if "@" in text else parse_name(text)
     if name:
         handles = _handles_by_name(db, pending.store_id, name)
