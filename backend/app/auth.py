@@ -20,6 +20,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token invalido o expirado",
         )
+    if payload.get("scope"):
+        # Llave de uso limitado (ej. captura del live de la extension), no es
+        # una sesion del admin.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token no valido aqui")
     return payload
 
 
