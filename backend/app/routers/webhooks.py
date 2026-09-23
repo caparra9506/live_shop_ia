@@ -53,6 +53,13 @@ async def tiktok_comment_webhook(request: Request):
         ai_db.add(Message(conversation_id=conversation.id, direction="in", body=comment))
         ai_db.commit()
         conversation_id = conversation.id
+
+        # Alguien pudo dar este @ por WhatsApp antes de comentar en el live.
+        try:
+            whatsapp_link.link_pending_on_comment(ai_db, store["id"], username)
+        except Exception:
+            logger.exception("Fallo el enlace tardio de WhatsApp para @%s", username)
+            ai_db.rollback()
     finally:
         ai_db.close()
 

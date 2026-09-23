@@ -10,6 +10,7 @@ WHATSAPP_TIKTOK_LINK_ENABLED."""
 import logging
 import re
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 
 import httpx
 from sqlalchemy import func
@@ -35,6 +36,12 @@ LINK_WINDOW_HOURS = 12
 # Mensajes automaticos maximos a un mismo numero sin enlazar: la pregunta y un
 # reintento. Despues queda para que el vendedor lo atienda a mano.
 MAX_BOT_MESSAGES = 2
+
+# Un @ mal escrito ("artesaniagenial" por "artesaniasgeniales") se acepta si se
+# parece asi de mucho a uno solo de los que comentaron en el live reciente.
+SIMILAR_MIN_RATIO = 0.85
+SIMILAR_MARGIN = 0.05
+RECENT_COMMENTS_HOURS = 36
 
 ASK_TEXT = (
     "¡Hola! 👋 Gracias por escribirnos. Para ayudarte con lo que viste en el live, "
@@ -107,6 +114,35 @@ def _find_tiktok_conversation(db: Session, store_id: int, username: str) -> Conv
     )
 
 
+def _find_similar_conversation(db: Session, store_id: int, username: str) -> Conversation | None:
+    """Conversacion de comentarios reciente cuyo @ se parece al que escribio la
+    persona. Solo si hay un unico parecido claro; si hay dos cerca, ninguno."""
+    since = datetime.utcnow() - timedelta(hours=RECENT_COMMENTS_HOURS)
+    candidates = (
+        db.query(Conversation)
+        .join(Message, Message.conversation_id == Conversation.id)
+        .filter(
+            Conversation.store_id == store_id,
+            ~Conversation.contact_phone.startswith(PENDING_PREFIX),
+            Message.direction == "in",
+            Message.created_at >= since,
+        )
+        .distinct()
+        .all()
+    )
+    wanted = username.lower()
+    scored = sorted(
+        ((SequenceMatcher(None, wanted, c.contact_phone.lower()).ratio(), c) for c in candidates),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    if not scored or scored[0][0] < SIMILAR_MIN_RATIO:
+        return None
+    if len(scored) > 1 and scored[1][0] > scored[0][0] - SIMILAR_MARGIN:
+        return None
+    return scored[0][1]
+
+
 def _register_in_liveshop(store_id: int, tiktok: str, phone: str, name: str | None) -> None:
     """Deja el telefono en tik_tok_user (via NestJS, nunca directo a MySQL)
     para que el agente del live ya pueda mandarle ofertas por WhatsApp."""
@@ -162,6 +198,8 @@ def _link(db: Session, pending: Conversation, target: Conversation) -> Conversat
 
 def _try_link(db: Session, instance: WhatsappInstance, pending: Conversation, username: str) -> bool:
     target = _find_tiktok_conversation(db, pending.store_id, username)
+    if not target:
+        target = _find_similar_conversation(db, pending.store_id, username)
     if not target or target.contact_phone.startswith(PENDING_PREFIX):
         return False
     if target.whatsapp_phone and target.whatsapp_phone != pending.whatsapp_phone:
@@ -272,3 +310,59 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
     if bot_messages < MAX_BOT_MESSAGES:
         _send(db, instance, pending, reply)
     return {"ok": True, "pending": True}
+
+
+def link_pending_on_comment(db: Session, store_id: int, username: str) -> str | None:
+    """Llega un comentario del live de @username: si alguien por WhatsApp dio
+    ese @ (o uno muy parecido) antes de comentar y quedo sin enlazar, se une
+    ahora. Devuelve el WhatsApp enlazado o None."""
+    if not settings.whatsapp_tiktok_link_enabled:
+        return None
+    pendings = (
+        db.query(Conversation)
+        .filter(Conversation.store_id == store_id, Conversation.contact_phone.startswith(PENDING_PREFIX))
+        .all()
+    )
+    if not pendings:
+        return None
+    instance = db.query(WhatsappInstance).filter_by(store_id=store_id).first()
+    if not instance:
+        return None
+    wanted = username.lower()
+    for pending in pendings:
+        bodies = (
+            db.query(Message.body)
+            .filter(Message.conversation_id == pending.id, Message.direction == "in")
+            .all()
+        )
+        for (body,) in bodies:
+            given = parse_username(body, allow_bare=False)
+            if not given:
+                continue
+            given = given.lower()
+            if given != wanted and SequenceMatcher(None, given, wanted).ratio() < SIMILAR_MIN_RATIO:
+                continue
+            phone = pending.whatsapp_phone
+            if _try_link(db, instance, pending, username):
+                return phone
+            break
+    return None
+
+
+def merge_pending_into(db: Session, conversation: Conversation) -> bool:
+    """El vendedor guardo a mano el WhatsApp de un usuario de TikTok: si ese
+    numero ya tenia un chat temporal (escribio sin dar su @), se une a este."""
+    if not conversation.whatsapp_phone or conversation.contact_phone.startswith(PENDING_PREFIX):
+        return False
+    pending = (
+        db.query(Conversation)
+        .filter(
+            Conversation.store_id == conversation.store_id,
+            Conversation.contact_phone == f"{PENDING_PREFIX}{conversation.whatsapp_phone}",
+        )
+        .first()
+    )
+    if not pending:
+        return False
+    _link(db, pending, conversation)
+    return True

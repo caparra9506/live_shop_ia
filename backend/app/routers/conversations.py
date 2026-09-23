@@ -167,6 +167,11 @@ def register_user(
 
     conversation.whatsapp_phone = evolution_client.normalize_phone(phone)
     conversation.contact_name = payload.name.strip()[:120]
+    # Si esa persona ya habia escrito por WhatsApp sin dar su @, su chat queda
+    # aparte (wa:<numero>): se une aqui para no verla dos veces en el panel.
+    from app.whatsapp_link import merge_pending_into
+
+    merge_pending_into(db, conversation)
     _apply_internal_label(db, conversation, REGISTERED_LABEL, "#22c55e")
     return ConversationOut.model_validate(conversation)
 
