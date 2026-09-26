@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_store_access
 from app.db import get_ai_db, LiveshopSessionLocal
 from app.models import StoreMessageTemplate, WhatsappInstance
+from app.whatsapp_link import ASK_TEXT
 from app.mysql_tools import find_store
 from app.schemas import WhatsappStatus
 from app.settings_store import get_store_ai_config, save_store_ai_config, clear_chatwoot_config
@@ -367,12 +368,11 @@ def whatsapp_status(
     return instance
 
 
-# Mensaje de retención: lo que el vendedor copia en Prospección y pega en el
-# chat de TikTok para que el cliente le escriba por WhatsApp. {usuario} = @ del
-# cliente, {whatsapp} = teléfono de la tienda (lo reemplaza el panel al copiar).
-DEFAULT_RETENTION_COPY = (
-    "Hola @{usuario} 👋 me regalas tu nombre y número de WhatsApp para contactarme contigo"
-)
+# Mensaje de retención: lo primero que el WhatsApp de la tienda le responde
+# solo a un número que no conocemos, para pedirle su @ de TikTok y unirlo con
+# sus comentarios del live (whatsapp_link.ask_text). {nombre} = nombre de su
+# perfil de WhatsApp.
+DEFAULT_RETENTION_COPY = ASK_TEXT
 RETENTION_COPY_MAX = 1000
 
 

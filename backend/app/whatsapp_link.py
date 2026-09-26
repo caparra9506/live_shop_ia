@@ -20,7 +20,7 @@ from app import evolution_client
 from app.config import settings
 from app.constants import REGISTERED_LABEL
 from app.db import LiveshopSessionLocal
-from app.models import Conversation, Message, WhatsappInstance
+from app.models import Conversation, Message, StoreMessageTemplate, WhatsappInstance
 from app.mysql_tools import (
     find_store_tiktok_user,
     find_tiktok_handles_by_name,
@@ -74,6 +74,20 @@ SAVED_TEXT = (
     "un comentario allá con lo que te gustó y te atendemos por aquí. "
     "En los próximos lives ya te reconocemos."
 )
+
+
+def ask_text(db: Session, store_id: int, name: str | None = None) -> str:
+    """Primer mensaje al número desconocido: el que armó la tienda en su panel
+    (WhatsApp → mensaje para pedir el @) o ASK_TEXT. {nombre} = nombre del
+    perfil de WhatsApp; si no hay, se quita sin dejar espacios raros."""
+    row = db.get(StoreMessageTemplate, store_id)
+    template = row.retention_copy if row and row.retention_copy else ASK_TEXT
+    name = (name or "").strip()
+    if name:
+        return template.replace("{nombre}", name)
+    return re.sub(r"[ \t]*\{nombre\}", "", template)
+
+
 RETRY_TEXT = "Entonces, ¿cuál es tu usuario de TikTok? (ej: @tuusuario)"
 AMBIGUOUS_TEXT = (
     "Hay varias personas con ese nombre en el live 😅 "
@@ -386,7 +400,7 @@ def handle_unknown_sender(
     if username and _try_link(db, instance, pending, username, allow_new=True):
         return {"ok": True, "confirming": username}
 
-    _send(db, instance, pending, ASK_TEXT)
+    _send(db, instance, pending, ask_text(db, store_id, push_name))
     return {"ok": True, "asked_tiktok": True}
 
 
@@ -425,7 +439,7 @@ def handle_pending(db: Session, instance: WhatsappInstance, pending: Conversatio
 
     # Sin @: puede ser el nombre con el que sale en el live.
     # Si hace rato no le escribimos, se arranca de nuevo con la pregunta.
-    reply = NOT_FOUND_TEXT if bot_messages else ASK_TEXT
+    reply = NOT_FOUND_TEXT if bot_messages else ask_text(db, pending.store_id, pending.contact_name)
     name = None if "@" in text else parse_name(text)
     if name:
         handles = _handles_by_name(db, pending.store_id, name)
