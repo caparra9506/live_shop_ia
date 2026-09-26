@@ -147,3 +147,16 @@ class CommentAiLog(Base):
     estimated_cost_usd = Column(Float, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class StoreMessageTemplate(Base):
+    """Mensaje de retención de cada tienda: el texto que el vendedor copia en
+    Prospección para pedirle al cliente del live que le escriba por WhatsApp.
+    Tabla aparte (no columna en store_ai_config) para que create_all la cree
+    sola al arrancar, sin migración a mano."""
+
+    __tablename__ = "store_message_templates"
+
+    store_id = Column(Integer, primary_key=True)
+    retention_copy = Column(Text, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

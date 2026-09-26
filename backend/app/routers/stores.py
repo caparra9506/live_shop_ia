@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_store_access
 from app.db import get_ai_db, LiveshopSessionLocal
-from app.models import WhatsappInstance
+from app.models import StoreMessageTemplate, WhatsappInstance
 from app.mysql_tools import find_store
 from app.schemas import WhatsappStatus
 from app.settings_store import get_store_ai_config, save_store_ai_config, clear_chatwoot_config
@@ -365,3 +365,55 @@ def whatsapp_status(
         _auto_provision_chatwoot_if_needed(store_id)
 
     return instance
+
+
+# Mensaje de retención: lo que el vendedor copia en Prospección y pega en el
+# chat de TikTok para que el cliente le escriba por WhatsApp. {usuario} = @ del
+# cliente, {whatsapp} = teléfono de la tienda (lo reemplaza el panel al copiar).
+DEFAULT_RETENTION_COPY = (
+    "Hola @{usuario} 👋 me regalas tu nombre y número de WhatsApp para contactarme contigo"
+)
+RETENTION_COPY_MAX = 1000
+
+
+class RetentionCopyIn(BaseModel):
+    text: str
+
+
+@router.get("/{store_id}/retention-copy")
+def get_retention_copy(store_id: int, db: Session = Depends(get_ai_db), _user: dict = Depends(get_current_user)):
+    require_store_access(store_id, _user)
+    row = db.get(StoreMessageTemplate, store_id)
+    return {
+        "text": row.retention_copy if row else DEFAULT_RETENTION_COPY,
+        "default": DEFAULT_RETENTION_COPY,
+        "is_default": row is None,
+    }
+
+
+@router.put("/{store_id}/retention-copy")
+def save_retention_copy(
+    store_id: int,
+    payload: RetentionCopyIn,
+    db: Session = Depends(get_ai_db),
+    _user: dict = Depends(get_current_user),
+):
+    require_store_access(store_id, _user)
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Escribe el mensaje")
+    if len(text) > RETENTION_COPY_MAX:
+        raise HTTPException(status_code=400, detail=f"Máximo {RETENTION_COPY_MAX} caracteres")
+    row = db.get(StoreMessageTemplate, store_id)
+    if text == DEFAULT_RETENTION_COPY:
+        # Volver al mensaje por defecto = no guardar copia propia
+        if row:
+            db.delete(row)
+            db.commit()
+        return {"text": DEFAULT_RETENTION_COPY, "default": DEFAULT_RETENTION_COPY, "is_default": True}
+    if row:
+        row.retention_copy = text
+    else:
+        db.add(StoreMessageTemplate(store_id=store_id, retention_copy=text))
+    db.commit()
+    return {"text": text, "default": DEFAULT_RETENTION_COPY, "is_default": False}
